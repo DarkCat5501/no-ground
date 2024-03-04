@@ -95,14 +95,64 @@ globalThis.sizeof = function(typedef) {
 };
 
 export const CTypes = Object.freeze({
+	//integer types
 	i8: new CType(1, (m) => m.getInt8, (m) => m.setInt8),
 	u8: new CType(1, (m) => m.getUint8, (m) => m.setUint8),
 	i16: new CType(2, (m) => m.getInt16, (m) => m.setUint16),
 	u16: new CType(2, (m) => m.getUint16, (m) => m.setUint16),
 	i32: new CType(4, (m) => m.getInt32, (m) => m.setInt32),
 	u32: new CType(4, (m) => m.getUint32, (m) => m.setUint32),
+	i64: new CType(8, (m) => m.getInt64, (m) => m.setInt64),
+	u64: new CType(8, (m) => m.getUint64, (m) => m.setUint64),
+	//floating point
+	f32: new CType(4, (m) => m.getFloat32, (m) => m.setFloat32),
+	f64: new CType(8, (m) => m.getFloat64, (m) => m.setFloat64),
+	//ptr type
 	ptr: new CType(4, (m) => m.getUint32, (m) => m.setUint32), //ptr data from wasm32
+
+	//String type is special because it need to have length defined
+	str(length, decoder) {
+		return new CArray(this.u8, length,
+			(b) => decoder.decode(b).replace(/[\u{0080}-\u{FFFF}\0]/gu, ""));
+	},
 });
+
+
+export class CArray extends CTypeBase {
+	/**@param {CTypeBase} type @param {number} length @param {()=>} item_map**/
+	constructor(type, length, item_map) {
+		super(type.size * length);
+		this.t = type;
+		this.l = length;
+		this._m = item_map;
+	}
+
+	/**@returns {any[]}  @param {DataView} view @param {number} [offset=0]*/
+	get(view, offset = 0) {
+		let data = [];
+		switch (this.t) {
+			case CTypes.u8: data = new Uint8Array(view.buffer, offset + view.byteOffset, this.l); break;
+			case CTypes.u16: data = new Uint16Array(view.buffer, offset + view.byteOffset, this.l); break;
+			case CTypes.u32: data = new Uint32Array(view.buffer, offset + view.byteOffset, this.l); break;
+			case CTypes.f32: data = new Float32Array(view.buffer, offset + view.byteOffset, this.l); break;
+			case CTypes.f64: data = new Float64Array(view.buffer, offset + view.byteOffset, this.l); break;
+			default:
+				for (let item = 0; item < this.l; item++) {
+					const ioff = offset + this.t.size * item;
+					data.push(this.t.get(view, ioff));
+				}
+				break;
+			case CTypes.u64: return new BigUint64Array(view.buffer, offset, this.l);
+		}
+		return this._m ? this._m(data) : data;
+	}
+
+	/**@param {DataView} view @param {any[]} data @param {number} [offset=0]*/
+	set(view, data, offset = 0) {
+		//TODO: implement array setting
+		throw new Error("Not implemented yet");
+	}
+}
 
 export class CMemView {
 	constructor(buff_view) { this.bf = buff_view }
