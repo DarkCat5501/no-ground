@@ -25,3 +25,7 @@ ${BUILDDIR}/web/module.wasm: ${BUILDDIR}/web/engine.o
 ${BUILDDIR}/web/engine.o: engine/engine.c engine/wasmstd.h
 	$(mkdir_guard)
 	$(WCC) $(WCFLAGS) $(INCLUDES) -c -o $@ engine/engine.c
+
+# run all web related test suits
+test_web: tests/test_web.js 
+	@bun tests/test_web.js
