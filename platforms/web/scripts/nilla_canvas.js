@@ -1,0 +1,4 @@
+class NillaCanvas {
+	constructor() { }
+	init() { }
+}

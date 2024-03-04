@@ -1,4 +1,4 @@
-import { init as initGame } from "./game.js"
+import { init as initGame } from "./game.js";
 
 function handleGlobalResize() {
 	const [width, height] = [window.innerWidth, window.innerHeight];
@@ -10,7 +10,7 @@ window.onload = () => {
 	//NOTE: All initial modules logic MUST go here
 	//initialize in screen elements
 
-	const { width, height } = handleGlobalResize()
+	const { width, height } = handleGlobalResize();
 	//create game canvas
 	const canvas = document.body.appendChild(document.createElement("canvas"));
 	const ctx2d = canvas.getContext("2d");
@@ -19,11 +19,10 @@ window.onload = () => {
 
 	//setup resize events
 	window.addEventListener("resize", () => {
-		const { width, height } = handleGlobalResize()
+		const { width, height } = handleGlobalResize();
 		Object.assign(canvas, { width, height });
 	});
 
 	//initialize game state
 	initGame(canvas, ctx2d);
-
-}
+};
