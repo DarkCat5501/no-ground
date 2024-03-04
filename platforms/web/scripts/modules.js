@@ -6,9 +6,9 @@ function handleGlobalResize() {
 	return { width, height };
 }
 
+
 window.onload = () => {
-	//NOTE: All initial modules logic MUST go here
-	//initialize in screen elements
+	//NOTE: All modules initialization musto go here 
 
 	const { width, height } = handleGlobalResize();
 	//create game canvas
