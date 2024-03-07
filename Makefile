@@ -32,7 +32,7 @@ test_web: tests/test_web.js
 	@bun tests/test_web.js
 
 
-no_ground_server: ${BUILDDIR}/server/server.o ${BUILDDIR}/server/thpool.o
+no_ground_server: ${BUILDDIR}/server/server.o ${BUILDDIR}/server/thpool.o ${BUILDDIR}/server/base64.o ${BUILDDIR}/server/sha1.o ${BUILDDIR}/server/ws.o
 	${CC} ${LFLAGS} -o $@ $+
 
 ${BUILDDIR}/server/server.o: server/server.c
@@ -42,3 +42,15 @@ ${BUILDDIR}/server/server.o: server/server.c
 ${BUILDDIR}/server/thpool.o: server/thpool.c
 	${mkdir_guard}
 	${CC} ${CFLAGS} ${INCLUDES} -I./server/ -c server/thpool.c -o $@ -ggdb
+
+${BUILDDIR}/server/base64.o: server/base64.c
+	${mkdir_guard}
+	${CC} ${CFLAGS} ${INCLUDES} -I./server/ -c server/base64.c -o $@ -ggdb
+
+${BUILDDIR}/server/sha1.o: server/sha1.c
+	${mkdir_guard}
+	${CC} ${CFLAGS} ${INCLUDES} -I./server/ -c server/sha1.c -o $@ -ggdb
+
+${BUILDDIR}/server/ws.o: server/ws.c
+	${mkdir_guard}
+	${CC} ${CFLAGS} ${INCLUDES} -I./server/ -c server/ws.c -o $@ -ggdb

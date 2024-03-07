@@ -3,9 +3,13 @@
 #include <asm-generic/errno-base.h>
 #include <asm-generic/errno.h>
 #include <asm-generic/ioctls.h>
+#include <assert.h>
+#include <base64.h>
 #include <core.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <sha1.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -14,9 +18,33 @@
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/socket.h>
-#include <unistd.h>
-#include <pthread.h>
 #include <thpool.h>
+#include <unistd.h>
+#include <ws.h>
+// OPEN SSL
+
+void calculateWebSocketAccept(const char *key, char *acceptBuffer,
+                              size_t acceptBufferSize) {
+  char magicString[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  u8 concatenated[256] = {0};
+  int cat_len = snprintf((char *)concatenated, sizeof(concatenated), "%s%s",
+                         key, magicString);
+  unsigned char digest[SHA1HashSize] = {0};
+
+  // Encode SHA1
+  SHA1Context shactx = {0}; // old way
+  SHA1Reset(&shactx);
+  SHA1Input(&shactx, concatenated, cat_len);
+  SHA1Result(&shactx, digest);
+
+  // Base 64 encode
+  u8 *encoded_64 = base64_encode(digest, SHA1HashSize, NULL);
+  size_t len = strlen((char *)encoded_64);
+  *(encoded_64 + len - 1) = '\0';
+  // copy into acceptBuffer
+  memcpy(acceptBuffer, encoded_64, len);
+  free(encoded_64);
+}
 
 typedef struct {
   u32 port;
@@ -41,6 +69,8 @@ typedef struct {
 } ClientCon;
 
 Server main_server = {0};
+ClientCon clients[2048] = {0};
+int total_clients = 0;
 threadpool thpool = {0};
 
 /**
@@ -55,13 +85,15 @@ struct aiocb *async_read(int fd, u8 *buffer, size_t size) {
   aio->aio_nbytes = size;
   aio->aio_offset = 0; // start at begining
 
-  if (aio_read(aio) < 0)
+  if (aio_read(aio) < 0) {
     free(aio);
-  return NULL;
+    return NULL;
+  }
   return aio;
 }
 
 void initServer(void) {
+  printf("Starting web server\n");
   // create the server socket
   if ((main_server.listenerfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
     panic("Server initialization error");
@@ -106,13 +138,13 @@ void initServer(void) {
 
 int pollConnections(void) {
   // setup initial socket listener
-  int timeout = 0;//(16 * 100); //-1: waits until have a connection
+  int timeout = 0; //(16 * 100); //-1: waits until have a connection
   int res = poll(main_server.poll, main_server.poll_size, timeout);
 
   if (res < 0) {
     panic("Poll connections failed!");
   } else if (res == 0) {
-    //NO connection needed to be checked
+    // NO connection needed to be checked
   } else {
     return res;
   }
@@ -120,15 +152,104 @@ int pollConnections(void) {
   return 0;
 }
 
+int validateHttpWSUpgradeHeader(char *buffer, size_t size, char **socket_key) {
+  char *tk = strtok(buffer, " :\r\n");
+
+  bool has_ws_key = false;
+  while (tk != NULL) {
+    tk = strtok(NULL, " :\r\n");
+    if (has_ws_key) {
+      *socket_key = tk;
+      return 1;
+    }
+
+    if (strcmp("Sec-WebSocket-Key", tk) == 0) {
+      has_ws_key = true;
+    }
+  }
+
+  return 0;
+}
+
+void createWSPingSignal(char *buffer, size_t size) {}
+
+void processClientRequest(ClientCon client) {
+  int bytes_read = 0;
+  memset(client.rbuffer, 0, sizeof(client.rbuffer));
+  do {
+    bytes_read = recv(client.connfd, client.rbuffer, sizeof(client.rbuffer),
+                      MSG_DONTWAIT);
+    if (bytes_read <= 0)
+      break; // could not read any data because there was nothing
+
+    if (bytes_read >= sizeof(WSFrameHeader)) {
+      printf("WS Request (%d)---------------\n", client.connfd);
+      debugWsPacket(client.rbuffer, bytes_read);
+      printf("WS end (%d)-------------------\n\n", client.connfd);
+    }
+  } while (bytes_read > 0);
+}
+
+int acceptWSHandshake(ClientCon client) {
+  int bytes_read = 0;
+  // int handshake_stage = 0;
+
+  // do {
+  // clear receive buffer and send buffer
+  memset(client.rbuffer, 0, sizeof(client.rbuffer));
+  memset(client.buffer, 0, sizeof(client.buffer));
+  // receiv messaage
+  bytes_read = recv(client.connfd, client.rbuffer, sizeof(client.rbuffer),MSG_DONTWAIT);
+  if(bytes_read<=0) return 0; //connection failed
+  // if (handshake_stage == 0) { // handle Handshake stage 0
+  // printf("Client %d sent %d bytes\n", client.connfd, bytes_read);
+  // printf("bytes received: %s",client.rbuffer);
+  // TODO: handle HTTPS websockets
+  char *ws_key = NULL;
+  int ws_ok = validateHttpWSUpgradeHeader((char *)client.rbuffer, bytes_read, &ws_key);
+
+  if (ws_ok) {
+    char acceptBuffer[128] = {0}; // calculate handshake key
+    calculateWebSocketAccept(ws_key, acceptBuffer, sizeof(acceptBuffer));
+    int acceptLen = snprintf((char *)client.buffer, sizeof(client.buffer),
+                             "HTTP/1.1 101 Switching Protocols\r\n"
+                             "Upgrade: websocket\r\n"
+                             "Connection: Upgrade\r\n"
+                             "Sec-WebSocket-Accept: %s\r\n"
+                             "\r\n",
+                             acceptBuffer);
+    send(client.connfd, client.buffer, acceptLen,MSG_DONTWAIT);
+    //try to process any early client request
+    // processClientRequest(client);
+  } else {
+    printf("- Handshake: FAILED\n");
+    return 0;
+  }
+  printf("- Handshake: OK\n");
+  return 1; 
+}
+
 void processNewClient(ClientCon client) {
-  printf("New client connected (%d)): %s at %d\n",client.connfd, inet_ntoa(client.addr.sin_addr),
+  printf("--{{New client trying connection (%d): %s at %d}}---\n",
+         client.connfd, inet_ntoa(client.addr.sin_addr),
          ntohs(client.addr.sin_port));
+  int handshake_ok = acceptWSHandshake(client);
 
+  if (handshake_ok) {
+    clients[total_clients++] = client;
+    // add client to connection pool
+    main_server.poll[total_clients].fd = client.connfd;
+    main_server.poll[total_clients].events = POLLIN;
+    main_server.poll_size = total_clients + 1;
 
-  // TODO: add client to server poll to be handled
-  // fds[nfds].fd = new_sd;
-  // fds[nfds].events = POLLIN;
-  // nfds++;
+    // AddClient to client buffer
+    printf("--{{New client connected {%d}(%d): %s at %d}}--\n", total_clients,
+           client.connfd, inet_ntoa(client.addr.sin_addr),
+           ntohs(client.addr.sin_port));
+  } else {
+    // kill connection
+    close(client.connfd);
+  }
 }
 
 void processConnection() {
@@ -137,23 +258,29 @@ void processConnection() {
   /* determine which ones they are.                          */
   /***********************************************************/
   size_t current_size = main_server.poll_size;
-  for (size_t connId = 0; connId < current_size; connId++) {
+  for (int connId = 0; connId < current_size; connId++) {
     // skip cause there's no data incomming
     struct pollfd pf = main_server.poll[connId];
-    if (pf.revents == 0)
+    if (pf.revents == 0) {
       continue;
+    }
 
     /*********************************************************/
     /* If revents is not POLLIN, it's an unexpected result,  */
     /* log and end the server.                               */
     /*********************************************************/
-    if (pf.revents != POLLIN) {
-      printf("  Error! revents = %d\n", pf.revents);
-      continue;
+    if (!(pf.revents & POLLIN)) {
+      if (pf.revents & POLLERR) {
+        fprintf(stderr, "Connection raised an error: %s\n", strerror(errno));
+        continue;
+      } else if (pf.revents & POLLHUP) {
+        printf("Connection just hungup %s\n", strerror(errno));
+        continue;
+      }
     }
 
     if (pf.fd == main_server.listenerfd) {
-      printf("Reading incomming message\n");
+      printf("\n...\n");
       int clientfd = -1;
       do {
         ClientCon clientconn = {0};
@@ -163,9 +290,9 @@ void processConnection() {
 
         if (clientfd < 0) {
           if (errno == EWOULDBLOCK || errno == EAGAIN) {
-            printf("Missconnection just skiped\n");
+            // printf("Missconnection just skiped!\n");
           } else {
-            panic("Error while processing client accept");
+            // panic("Error while processing client accept");
           }
         } else {
           clientconn.connfd = clientfd;
@@ -173,44 +300,47 @@ void processConnection() {
         }
 
       } while (clientfd != -1);
+    } else {
+      int clientId = connId - 1;
+      assert(clientId >= 0 && "Missuse of global connection listener");
+      processClientRequest(clients[clientId]);
     }
   }
 }
 
-void initThreadPool(void){
+void initThreadPool(void) {
   printf("Starting pool...\n");
   thpool = thpool_init(2);
 }
 
-void processPhysics(void* args) {
+void processPhysics(void *args) {
   int thread_id = pthread_self();
   printf("Thread #%u started working on physics", thread_id);
 
   do {
     // printf("physics update!\n");
-    usleep(1000/2);//force 2fps only
-  } while(1);
+    usleep(1000 / 2); // force 2fps only
+  } while (1);
 }
 
 int main(int argc, char *argv[]) {
-
   initThreadPool();
 
   int server_running = 1;
   initServer();
 
-  //dispatch thead to start working on physics
-  thpool_add_work(thpool,processPhysics,NULL);
+  // dispatch thead to start working on physics
+  //  thpool_add_work(thpool,processPhysics,NULL);
 
   do {
     int amount = pollConnections();
-
+    // printf("* amout = %d\n",amount);
     if (amount > 0) {
-      printf("Incomming connection...\n");
+      // printf("Incomming connection...\n");
       processConnection();
     }
 
-    usleep(16); // about 60 FPS
+    usleep(1000 / 1); // about 60 FPS
   } while (server_running);
 
   return 0;
@@ -237,7 +367,6 @@ void panic(const char *fmt, ...) {
   va_end(args);
   exit(1);
 }
-
 // basic poll server arch
 
 // #include <stdio.h>
