@@ -28,8 +28,6 @@ typedef struct {
 	i32 fd;
 	ConnStatus status;				//status of a connection
 	clock_t last_updated; //how long has the client been updated
-
-	u8 buffer[1024]; //buffer to send data
 	u8 rbuffer[1024]; //buffer to receive data
 } Client;
 

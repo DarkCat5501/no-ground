@@ -5,14 +5,18 @@
 #include <assert.h>
 #include <base64.h>
 #include <errno.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <sha1.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
 #include <ws.h>
 
-int wsMakePingPacket(u8 *buffer, size_t size) {
+i32 wsMakePingPacket(u8 *buffer, size_t size) {
   // create ping header
   WSFrameHeader header = {0};
   header.FIN = 1; // indicates it is just a single packet
@@ -26,7 +30,7 @@ int wsMakePingPacket(u8 *buffer, size_t size) {
   return sizeof(WSFrameHeader);
 }
 
-int wsReadPacket(u8 *buffer, size_t size, WSPacket *packet) {
+i32 wsReadPacket(u8 *buffer, size_t size, WSPacket *packet) {
   // this is not a valid packet
   if (size < sizeof(WSFrameHeader))
     return 0;
@@ -47,8 +51,12 @@ int wsReadPacket(u8 *buffer, size_t size, WSPacket *packet) {
   } else {
     u32 ulengthh = htonl(*(u32 *)(buffer + offset));
     u32 ulengthl = htonl(*(u32 *)(buffer + offset + sizeof(u32)));
-    if (ulengthh != 0) {
-      printf("[SECURITY]: Data too long to be loaded\n");
+    if (ulengthh != 0 || ulengthl > MAX_WS_PACKET_LENGTH) {
+      printf(
+          "[WS] Security issue: Data too long to be loaded, exceeded %dMb\n",
+          MAX_WS_PACKET_LENGTH / 1024 / 1024
+      );
+
       return 0;
     }
     // converts a net i64 into a host u64
@@ -62,37 +70,38 @@ int wsReadPacket(u8 *buffer, size_t size, WSPacket *packet) {
   }
 
   // validate if the data size corresponds to the data found
-  int len = size - offset;
-  if (offset + length > size) {
-    printf("[WS READ PACKET] Incomplete packet Expected: %d, found: %d\n",
-           length, len);
-  }
+  i32 len = size - offset;
+  // if (offset + length > size) {
+  //   printf("[WS READ PACKET] Incomplete packet Expected: %d, found: %d\n",
+  //          length, len);
+  // }
 
   if (packet != NULL && length != 0) {
     const char *raw_data = (char *)(buffer + offset);
     u8 *payload = malloc(length * sizeof(u8));
-    // read and deobfuscate packet data
+
+    // only decode if all data is present
     if (header.mask && length != 0) {
       for (size_t i = 0; i < len; i++)
         payload[i] = raw_data[i] ^ mask_key[i % sizeof(u32)];
     }
-
-    // copy stuff into the packet
-    packet->header = header;
-    packet->length = length;
-    packet->len = len;
     packet->payload = payload;
-    memcpy(&packet->mask_key, mask_key, sizeof(u32));
   }
+
+  // copy stuff into the packet
+  packet->header = header;
+  packet->length = length;
+  packet->len = len;
+  memcpy(&packet->mask_key, mask_key, sizeof(u32));
 
   return 1;
 }
 
-int wsDecodePacketData(WSPacket *packet, u8 *buffer, size_t size) {
+i32 wsDecodePacketData(WSPacket *packet, u8 *buffer, size_t size) {
   if (packet->payload == NULL)
     return 0;
   if (size > packet->length - packet->len) {
-    printf("PACKET DECODE: Invalid buffer length, to big!\n");
+    printf("[WS] PACKET DECODE: Invalid buffer length, to big!\n");
     return 0;
   }
 
@@ -105,12 +114,17 @@ int wsDecodePacketData(WSPacket *packet, u8 *buffer, size_t size) {
 
 void wsDebugPacket(WSPacket *packet) {
   // Show WSPACKET HEADER
+  time_t rawtime = time(NULL);
+  char *now = ctime(&rawtime);
+  now[strlen(now) - 1] = '\0';
+
   WSFrameHeader header = packet->header;
-  printf("WSFrameHeader = { FIN=%d, RSV=0x%x, opcode=%d, mask=0x%x, "
+  printf("[WS] {%s} WSFrameHeader = { FIN=%d, RSV=0x%x, opcode=%d, mask=0x%x, "
          "length=0x%x } {0x%02x};\n",
-         header.FIN, header.RSV, header.opcode, header.mask, header.length,
+         now, header.FIN, header.RSV, header.opcode, header.mask, header.length,
          *(u16 *)&header);
-  printf("WSDataLen = %u { patcket: %d }\n", header.length, packet->length);
+  printf("[WS] WSDataLen = %u { patcket: %d }\n", header.length,
+         packet->length);
 }
 
 void wsPacketFree(WSPacket *packet) {
@@ -127,12 +141,18 @@ static i32 _wsCheckHttpHeaderForSecKey(char *buffer, size_t size,
   int has_ws_key = 0;
   while (tk != NULL) {
     tk = strtok(NULL, " :\r\n");
+    if (tk == NULL)
+      break;
+    int len = strlen(tk);
+
     if (has_ws_key) {
-      memcpy(socket_key, tk, strlen(tk)); // copy key into output
+      memcpy(socket_key, tk, len); // copy key into output
       return 1;
     }
 
-    if (strcmp("Sec-WebSocket-Key", tk) == 0) has_ws_key = 1;
+    if (strncmp("Sec-WebSocket-Key", tk, 17 /*length of Sec-WebSocket-Key*/) ==
+        0)
+      has_ws_key = 1;
   }
 
   return 0;
@@ -167,13 +187,14 @@ ConnStatus wsHandshake(Client *client) {
 
   // clear the buffers of the client
   memset(client->rbuffer, 0, sizeof(client->rbuffer));
-  memset(client->buffer, 0, sizeof(client->buffer));
 
   // try to receive any messages without blocking
-  bytes_read =
-      recv(client->fd, client->rbuffer, sizeof(client->rbuffer), MSG_WAITFORONE);
-  if (bytes_read < 0) return CONN_RETRY; //could not read the handshake right away
-  else if(bytes_read==0) return CONN_KILL; //connection failed
+  bytes_read = recv(client->fd, client->rbuffer, sizeof(client->rbuffer),
+                    MSG_WAITFORONE);
+  if (bytes_read < 0)
+    return CONN_RETRY; // could not read the handshake right away
+  else if (bytes_read == 0)
+    return CONN_KILL; // connection failed
 
   char ws_key[128] = {0};
   // client must provide handshake key
@@ -183,8 +204,8 @@ ConnStatus wsHandshake(Client *client) {
   if (key_ok) {
     char acceptBuffer[128] = {0}; // calculate handshake key
     _wsCalculateAcceptKey(ws_key, acceptBuffer, sizeof(acceptBuffer));
-
-    int acceptLen = snprintf((char *)client->buffer, sizeof(client->buffer),
+    char buffer[512] = {0};
+    int acceptLen = snprintf(buffer, sizeof(buffer),
                              "HTTP/1.1 101 Switching Protocols\r\n"
                              "Upgrade: websocket\r\n"
                              "Connection: Upgrade\r\n"
@@ -192,7 +213,7 @@ ConnStatus wsHandshake(Client *client) {
                              "\r\n",
                              acceptBuffer);
 
-    send(client->fd, client->buffer, acceptLen, MSG_DONTWAIT);
+    send(client->fd, buffer, acceptLen, MSG_DONTWAIT);
   } else {
     printf("- Handshake: FAILED\n");
     return CONN_KILL;
@@ -209,69 +230,154 @@ ConnStatus wsHandleConnection(Client *client, void *srvptr) {
 
   int handshake_ok = wsHandshake(client);
 
-  if (handshake_ok==CONN_KEEP_ALIVE) {
+  if (handshake_ok == CONN_KEEP_ALIVE) {
     printf("--{{New client connected: %s at %d}}--\n",
            inet_ntoa(client->addr.sin_addr), ntohs(client->addr.sin_port));
-    if(server->onconnect)
-    	return server->onconnect(client,srvptr);
+    if (server->onconnect)
+      return server->onconnect(client, srvptr);
     return CONN_KEEP_ALIVE;
   } else {
-  	printf("--{{ REJECTED }}--\n");
+    printf("--{{ REJECTED }}--\n");
   }
 
   return CONN_KILL;
 }
 
+ConnStatus wsHandlePing(Client *client, void *_wsserver) {
+  WSFrameHeader header = {
+      .opcode = WS_OP_PING,
+      .RSV = 0,
+      .FIN = 1,
+      .length = 0,
+      .mask = 0,
+  };
+
+  int err = send(client->fd, &header, sizeof(header), MSG_DONTWAIT);
+  if (err < 0)
+    return CONN_KILL;
+  client->last_updated = clock();
+
+  return CONN_KEEP_ALIVE;
+}
+
 ConnStatus wsHandleMessages(Client *client, void *wsserver) {
-	WSServer* server = (WSServer*)wsserver;
-  int bytes_read = 0;
-  memset(client->rbuffer, 0, sizeof(client->rbuffer));//clear the read buffer
+  ConnStatus status = CONN_KILL;
+  WSServer *server = (WSServer *)wsserver;
+  i32 bytes_read = 0;
+  memset(client->rbuffer, 0, sizeof(client->rbuffer)); // clear the read buffer
   WSPacket packet = {0};
 
-	//try to read into the buffer
-  bytes_read = recv(client->fd, client->rbuffer, sizeof(client->rbuffer), MSG_DONTWAIT);
-  if(bytes_read<=0){
-  	if(errno==EAGAIN || errno==EWOULDBLOCK) return CONN_KEEP_ALIVE;
-  	return CONN_KILL;
-  } 
+  // try to read into the buffer
+  bytes_read =
+      recv(client->fd, client->rbuffer, sizeof(client->rbuffer), MSG_DONTWAIT);
+  if (bytes_read <= 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      return CONN_KEEP_ALIVE;
+    fprintf(stderr, "[WS] Error reading remaining data from client\n");
+    return CONN_KILL;
+  }
 
+  int read_ok = wsReadPacket(client->rbuffer, bytes_read, &packet);
+  if (!read_ok) {
+    fprintf(stderr, "[WS] Invalid packet received!\n");
+    goto defer;
+  }
 
-	wsReadPacket(client->rbuffer, bytes_read, &packet);
-	wsDebugPacket(&packet);
+  // check for incomplete messages and try to pull the rest
+  if (packet.length > 0 && packet.len < packet.length) {
+    i32 remain_len = packet.length - packet.len;
+    u8 *remain_buff = packet.payload + packet.len;
+    bytes_read = recv(client->fd, remain_buff, remain_len,
+                      MSG_WAITALL); // NOTE: Waitforone does not work
 
-  //check for incomplete messages and try to pull the rest
-	if(packet.length>0 && packet.len < packet.length){
-		i32 remain_len = packet.length - packet.len;
-		u8* remain_buff = packet.payload+packet.len;
-		bytes_read = recv(
-			client->fd, 
-			remain_buff,
-			remain_len,
-			MSG_WAITFORONE);
+    if (bytes_read != remain_len) {
+      fprintf(stderr, "[WS] Invalid remain: read %d, remain %d\n", bytes_read,
+              remain_len);
+      goto defer;
+    }
 
-		if(bytes_read != remain_len) return CONN_KILL;
+    // decode the ramin data
+    int decode_ok = wsDecodePacketData(&packet, remain_buff, remain_len);
+    if (!decode_ok) {
+      printf("[WS] Could not decode reading\n");
+      goto defer;
+    }
 
-		//decode the ramin data
-		int decode_ok = wsDecodePacketData(&packet, remain_buff, remain_len);
-		if(!decode_ok) return CONN_KILL;
-		
-		packet.len += bytes_read;
-	} else if (packet.header.FIN == 0) {
-		//TODO: handle multipacket messages
-		assert(0 && "Not implemented yet!");
-	}
+    packet.len += bytes_read;
+  } else if (packet.header.FIN == 0) {
+    // TODO: handle multipacket messages
+    assert(0 && "Not implemented yet!");
+  }
 
-	//handle packet message
-	if(server->onpacket){
-		ConnStatus status = server->onpacket(client,&packet,wsserver);
-		if(
-			status==CONN_KEEP_ALIVE && 
-			(packet.header.opcode == WS_OP_TEXT ||packet.header.opcode == WS_OP_BIN) &&
-			server->onmessage
-		) server->onmessage(client,packet.payload,packet.len,wsserver);
+  // handle packet message
+  if (server->onpacket) {
+    // handle packet
+    status = server->onpacket(client, &packet, wsserver);
+    // handle packet message
+    if (status == CONN_KEEP_ALIVE &&
+        (packet.header.opcode == WS_OP_TEXT ||
+         packet.header.opcode == WS_OP_BIN) &&
+        server->onmessage)
+      server->onmessage(client, packet, wsserver);
+  }
 
-		return status;
-	}
-
-	return CONN_KILL;
+defer:
+  wsPacketFree(&packet);
+  return status;
 }
+
+
+i32 wsSendPacket(Client *client, const WSPacket packet) {
+  u8 buffer[WS_MAX_HEADER_LEN] = {0};
+
+  WSFrameHeader header = packet.header;
+  header.mask = 0; //ALL SERVER's PACKETs SHOULD BE UNMASKED
+  header.FIN = 1; //send message as complete block
+
+  i32 offset = sizeof(WSFrameHeader);
+  //handle variable packet size
+  if(packet.length < 126) {
+    header.length = packet.length;
+  } else if(packet.length < SHRT_MAX) {
+    u16 length16 = htons((u16)packet.length);
+    memcpy(buffer+offset,&length16,sizeof(length16));
+    header.length = 126;
+    offset+=sizeof(u16);
+  } else {
+    //NOTE: only encoded low 32bits instead of 64
+    u32 lenlow = htonl(packet.length);
+    memcpy(buffer+offset+sizeof(u32),&lenlow,sizeof(u32));
+    header.length = 127;
+    offset+=sizeof(u64);
+  }
+  //copy into temporary buffer
+  memcpy(buffer,&header,sizeof(WSFrameHeader));
+ 
+  //send controll header
+  int r = send(client->fd,buffer,offset,MSG_DONTWAIT);
+  if(r!=offset) {
+    fprintf(stderr,"[WS] Error writing packet header!\n");
+    return 1;
+  }
+  //send message
+  r = send(client->fd,packet.payload,packet.length,MSG_DONTWAIT);
+  if(r!=packet.length) {
+    fprintf(stderr,"[WS] Error writing packet body!\n");
+    return 1;
+  }
+  return 0;
+}
+
+i32 wsSendToAll(WSServer *wsserver, const WSPacket packet) {
+  if(wsserver->bare_server==NULL) return 0;//failed to get the bare server
+ 
+  Server *bserver = wsserver->bare_server;
+
+  int has_err = 0;
+  for(i32 index=0;index<bserver->clients.len;index++){
+    Client* client = &bserver->clients.clients[index];
+    has_err += wsSendPacket(client,packet);
+  }
+
+  return has_err;
+} 

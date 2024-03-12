@@ -117,7 +117,7 @@ static ConnStatus conHandleConnect(Server* server,Client* client){
 		if(status!=CONN_KILL) {
 			printf("New client in!\n");
 			client->status=status;
-			client->last_updated = 0;
+			client->last_updated = clock();
 			connPushToClientPoll(&server->clients,client);
 			connPushToPoll(&server->poll,client->fd, POLLIN);
 			return status;
@@ -155,7 +155,8 @@ i32 conCheckConnections(Server* server){
 
 i32 conHandleReceivData(Server *server, i32 clientIndex){
 	Client *client = &server->clients.clients[clientIndex-1];
-	//TODO: mark client as alive
+	
+	client->last_updated = clock();//updates client clock
 
 	if(server->onmessage){
 		return server->onmessage(client,server->data);
@@ -208,7 +209,7 @@ i32 conPollEvents(Server *server){
     			if(conHandleReceivData(server,index)==CONN_KILL)
 						pfd->events = 0x0;//markes as delete 
     		}
-  		}
+  		} else client->last_updated = clock();
 		}
 	} else if(server->onping) {
 		// printf("Sending pings:\n");

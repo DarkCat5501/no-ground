@@ -1,10 +1,15 @@
 #ifndef __WS_H__
 #define __WS_H__
 
+#ifndef MAX_WS_PACKET_LENGTH
+#define MAX_WS_PACKET_LENGTH (1 * 1024 * 1024) /*1Mb*/
+#endif
+
 #include <conn.h>
 #include <core.h>
 
 enum {
+	//data frame
 	WS_OP_CONTINUATION = 0,
 	WS_OP_TEXT,
 	WS_OP_BIN,
@@ -13,6 +18,7 @@ enum {
 	WS_OP_CSM_DT_3,
 	WS_OP_CSM_DT_4,
 	WS_OP_CSM_DT_5,
+	//control frames
 	WS_OP_CLOSE,
 	WS_OP_PING,
 	WS_OP_PONG,
@@ -31,6 +37,9 @@ typedef struct {
 	u16 mask: 1;   //indicates wheather the payload is masked or not
 } WSFrameHeader;
 
+
+#define WS_MAX_HEADER_LEN (sizeof(WSFrameHeader)+sizeof(u64)+sizeof(u32))
+
 typedef struct {
 	WSFrameHeader header; //operation code
 	u8 mask_key[sizeof(u32)];
@@ -44,9 +53,9 @@ typedef struct {
 } WSFrame;
 
 
-typedef void(*OnWSMessage)(Client* client,u8* message, size_t length,void* server);
 typedef ConnStatus(*OnWSConnect)(Client* client,void* server);
 typedef ConnStatus(*OnWSPacket)(Client* client,WSPacket* packet,void* server);
+typedef void(*OnWSMessage)(Client* client,const WSPacket packet,void* server);
 
 typedef struct {
 	Server* bare_server;
@@ -71,6 +80,9 @@ ConnStatus wsHandleConnection(Client* client,void* _wsserver);
 ConnStatus wsHandleMessages(Client* client,void* _wsserver);
 ConnStatus wsHandlePing(Client* client,void* _wsserver);
 
+//messaging utilities
+i32 wsSendPacket(Client* client,const WSPacket packet);
+i32 wsSendToAll(WSServer* server,const WSPacket packet);
 
 void wsDebugPacket(WSPacket* packet); 
 #endif //__WS_H__
