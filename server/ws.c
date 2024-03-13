@@ -1,4 +1,4 @@
-#include "conn.h"
+#include <conn.h>
 #include <arpa/inet.h>
 #include <asm-generic/errno-base.h>
 #include <asm-generic/errno.h>
@@ -267,9 +267,8 @@ ConnStatus wsHandleMessages(Client *client, void *wsserver) {
   memset(client->rbuffer, 0, sizeof(client->rbuffer)); // clear the read buffer
   WSPacket packet = {0};
 
-  // try to read into the buffer
-  bytes_read =
-      recv(client->fd, client->rbuffer, sizeof(client->rbuffer), MSG_DONTWAIT);
+  //try to read the maximum length of a header
+  bytes_read = recv(client->fd, client->rbuffer, WS_MAX_HEADER_LEN, MSG_DONTWAIT);
   if (bytes_read <= 0) {
     if (errno == EAGAIN || errno == EWOULDBLOCK)
       return CONN_KEEP_ALIVE;
@@ -283,8 +282,14 @@ ConnStatus wsHandleMessages(Client *client, void *wsserver) {
     goto defer;
   }
 
+  //check for fragmented data
+  if(packet.header.FIN==0 && packet.header.opcode!=WS_OP_CONTINUATION) {
+    //fragmentation frame
+    wsDebugPacket(&packet);
+    assert(0 && "Not implemented yet!");
+  }
   // check for incomplete messages and try to pull the rest
-  if (packet.length > 0 && packet.len < packet.length) {
+  else if (packet.length > 0 && packet.len < packet.length) {
     i32 remain_len = packet.length - packet.len;
     u8 *remain_buff = packet.payload + packet.len;
     bytes_read = recv(client->fd, remain_buff, remain_len,
@@ -304,9 +309,6 @@ ConnStatus wsHandleMessages(Client *client, void *wsserver) {
     }
 
     packet.len += bytes_read;
-  } else if (packet.header.FIN == 0) {
-    // TODO: handle multipacket messages
-    assert(0 && "Not implemented yet!");
   }
 
   // handle packet message
@@ -354,13 +356,13 @@ i32 wsSendPacket(Client *client, const WSPacket packet) {
   memcpy(buffer,&header,sizeof(WSFrameHeader));
  
   //send controll header
-  int r = send(client->fd,buffer,offset,MSG_DONTWAIT);
+  int r = conSendMessage(client,(u8*)buffer,offset);
   if(r!=offset) {
     fprintf(stderr,"[WS] Error writing packet header!\n");
     return 1;
   }
   //send message
-  r = send(client->fd,packet.payload,packet.length,MSG_DONTWAIT);
+  r = conSendMessage(client,packet.payload,packet.length);
   if(r!=packet.length) {
     fprintf(stderr,"[WS] Error writing packet body!\n");
     return 1;
@@ -375,9 +377,27 @@ i32 wsSendToAll(WSServer *wsserver, const WSPacket packet) {
 
   int has_err = 0;
   for(i32 index=0;index<bserver->clients.len;index++){
-    Client* client = &bserver->clients.clients[index];
+    Client* client = &bserver->clients.items[index];
     has_err += wsSendPacket(client,packet);
   }
 
   return has_err;
-} 
+}
+
+//TODO: implement packt multiplexing
+// i32 wsPacketPollInit(WSPacketPoll *poll, size_t cap){
+//   poll->packets = (WSPacket*)calloc(sizeof(WSPacket),cap);
+//   if(poll->packets==NULL) return 1;
+//   poll->len = 0; poll->cap = cap;
+//   return 0;
+// }
+// void wsPacketPollFree(WSPacketPoll *poll){
+//   poll->len=0;poll->cap=0;
+//   free(poll->packets);
+// }
+// i32 wsPacketPollPush(WSPacketPoll *poll, const WSPacket *packet){
+//   return 0;
+// }
+// i32 wsPacketPollShift(WSPacketPoll *poll, WSPacket *packet){
+//   return 0;
+// }

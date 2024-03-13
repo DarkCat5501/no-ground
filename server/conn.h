@@ -6,10 +6,13 @@
 #include <time.h>
 
 enum {
-	CONN_OK,
+	CONN_FAIL, //just for convenience
+	CONN_OK, // just for convenience
 	CONN_ERR_ALLOC_FAIL,
 	CONN_ERR_SOCKET_FAIL,
 	CONN_ERR_SETUP_FAIL,
+	CONN_ERR_RECV_FAIL,
+	CONN_ERR_SEND_FAIL,
 };
 
 typedef enum {
@@ -31,6 +34,17 @@ typedef struct {
 	u8 rbuffer[1024]; //buffer to receive data
 } Client;
 
+typedef struct {
+	struct pollfd* items; //holds the currently polling clients
+	size_t len; //current length of the polling
+	size_t cap; //the maximum capacity of the poll
+} ServerPoll;		
+
+typedef struct {
+	Client *items; //holds the list of connected clients
+	size_t len; //current length of the polling
+	size_t cap; //the maximum capacity of the poll
+} ClientPoll;
 
 #define MAX_POLLING_CLIENTS 256
 
@@ -40,17 +54,6 @@ typedef ConnStatus(*OnPing)(Client* client,void* data);
 typedef void(*DisconnectCallback)(Client* client,void* data);
 
 
-typedef struct {
-	struct pollfd* fds; //holds the currently polling clients
-	size_t len; //current length of the polling
-	size_t cap; //the maximum capacity of the poll
-} ServerPoll;		
-
-typedef struct {
-	Client *clients; //holds the list of connected clients
-	size_t len; //current length of the polling
-	size_t cap; //the maximum capacity of the poll
-} ClientPoll;
 
 i32 connCreatePoll(ServerPoll* poll, size_t cap);
 void connDestroyPoll(ServerPoll* poll);
@@ -75,11 +78,19 @@ typedef struct {
 } Server;
 
 i32 conInitServer(Server* server,const ServerConfig config);
-i32 conCheckConnections(Server* server);
-i32 conHandleReceivData(Server* server,i32 clientIndex);
+i32 conAcceptConnections(Server* server);
+i32 conHandleReceivData(Server* server,Client* client);
 i32 conPollEvents(Server* server);
 
 i32 conHasEvents(Server* server);
 void conDestroyServer(Server* server);
+
+/** Safely send a message to a client **/
+i32 conSendMessage(const Client* client,const u8* message,size_t len);
+
+/** Safely read a message from a client waiting for all content to be finished **/
+i32 conRecvMessage(const Client* client,u8* message,size_t len);
+/** Safely read a message from a client nonblocking **/
+i32 conCheckRecvMessage(const Client* client,u8* message,size_t len);
 
 #endif //__NG_CONN_H__

@@ -2,7 +2,7 @@
 #define __WS_H__
 
 #ifndef MAX_WS_PACKET_LENGTH
-#define MAX_WS_PACKET_LENGTH (1 * 1024 * 1024) /*1Mb*/
+#define MAX_WS_PACKET_LENGTH (50 * 1024 * 1024) /*50Mb*/
 #endif
 
 #include <conn.h>
@@ -51,6 +51,22 @@ typedef struct {
 typedef struct {
 	WSFrameHeader header;
 } WSFrame;
+
+//TODO: implement packet multiplexing
+// typedef struct {
+// 	WSPacket *packets;
+// 	i32 len;
+// 	i32 cap;
+// } WSPacketPoll;
+// i32 wsPacketPollInit(WSPacketPoll* poll,size_t cap);
+// void wsPacketPollFree(WSPacketPoll* poll);
+// i32 wsPacketPollShift(WSPacketPoll* poll,WSPacket* packet);
+// i32 wsPacketPollPush(WSPacketPoll* poll,const WSPacket* packet);
+// typedef struct {
+// 	Client* client;
+// 	WSPacketPoll recv_poll;//list of packets received from client
+// 	WSPacketPoll send_poll;//list of packets waiting to be sent to client
+// } WSClient;
 
 
 typedef ConnStatus(*OnWSConnect)(Client* client,void* server);

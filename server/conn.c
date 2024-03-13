@@ -12,51 +12,95 @@
 #include <sys/poll.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
+
+
+/** 'Safe' abstractions **/
+i32 conSendMessage(const Client *client, const u8 *message, size_t len) {
+	//check if the client file descriptor if valid
+	int fd_ok = fcntl(client->fd,F_GETFD);
+	if(fd_ok < 0){ 
+		fprintf(stderr,"[CONN] Invalid client: %x!\n",fd_ok);
+		return 0;//invalid client!
+	}
+	int sent = send(client->fd,message,len, MSG_NOSIGNAL);
+	if(sent == 0){
+		fprintf(stderr,"[CONN] Error during sending: sent %d!\n",sent);
+		return -1;//error sending file
+	}
+	return sent;
+}
+i32 conRecvMessage(const Client *client,u8 *message, size_t len) {
+	//check if the client file descriptor if valid
+	int fd_ok = fcntl(client->fd,F_GETFD);
+	if(fd_ok < 0){ 
+		fprintf(stderr,"[CONN] Invalid client: %x!\n",fd_ok);
+		return 0;//invalid client!
+	}
+	int recved = recv(client->fd,(void*)message,len, MSG_WAITFORONE|MSG_NOSIGNAL);
+	if(recved == 0){
+		fprintf(stderr,"[CONN] Error during receving: recved %d!\n",recved);
+		return 0;//error sending file
+	}
+	return recved;
+}
+i32 conCheckRecvMessage(const Client *client, u8 *message, size_t len){
+	//check if the client file descriptor if valid
+	int fd_ok = fcntl(client->fd,F_GETFD);
+	if(fd_ok < 0){ 
+		fprintf(stderr,"[CONN] Invalid client: %x!\n",fd_ok);
+		return 0;//invalid client!
+	}
+	int recved = recv(client->fd,(void*)message,len, MSG_DONTWAIT|MSG_NOSIGNAL);
+	if(recved == 0){
+		fprintf(stderr,"[CONN] Error during receving: recved %d!\n",recved);
+		return 0;//error sending file
+	}
+	return recved;
+}
 
 /* Poll related functions */
 i32 connCreatePoll(ServerPoll *poll, size_t cap){
-	poll->cap = cap;
-	poll->fds = calloc(cap,sizeof(struct pollfd));
-	if(poll->fds==NULL) return CONN_ERR_ALLOC_FAIL;
-	poll->len = 0;
+	poll->items = calloc(cap,sizeof(struct pollfd));
+	if(poll->items==NULL) return CONN_ERR_ALLOC_FAIL;
+	poll->len = 0; poll->cap = cap;
 	return CONN_OK;
 }
 
 void connDestroyPoll(ServerPoll *poll){
-	poll->cap = 0;
-	if(poll->fds) free(poll->fds);
-	poll->len = 0;
+	if(poll->items) free(poll->items);
+	poll->cap = 0; poll->len = 0;
 }
 
 i32 connPushToPoll(ServerPoll *poll, i32 fd, i16 events){
 	if(poll->len>=poll->cap) return -1;
 
 	i32 crr = poll->len++;
-	poll->fds[crr].fd = fd;
-	poll->fds[crr].events = events;
-	poll->fds[crr].revents = 0x0;
+	poll->items[crr].fd = fd;
+	poll->items[crr].events = events;
+	poll->items[crr].revents = 0x0;
 
 	return crr;
 }
 
 i32 connCreateClientPoll(ClientPoll *poll, size_t cap){
 	poll->cap = cap;
-	poll->clients = calloc(cap,sizeof(Client));
-	if(poll->clients == NULL) return CONN_ERR_ALLOC_FAIL;
+	poll->items = calloc(cap,sizeof(Client));
+	if(poll->items == NULL) return CONN_ERR_ALLOC_FAIL;
 	poll->len = 0;
 	return CONN_OK;
 }
 
 void connDestroyClientPoll(ClientPoll *poll){
 	poll->cap = 0;
-	if(poll->clients) free(poll->clients);
+	if(poll->items) free(poll->items);
 	poll->len = 0;
 }
 
 i32 connPushToClientPoll(ClientPoll *poll,Client* client){
 	if(poll->len>=poll->cap) return -1;
 	i32 crr = poll->len++;
-	memcpy(&poll->clients[crr],client,sizeof(Client));
+	memcpy(&poll->items[crr],client,sizeof(Client));
 
 	return crr;
 }
@@ -106,7 +150,7 @@ i32 conInitServer(Server *server,const ServerConfig config){
 
 i32 conHasEvents(Server *server){ 
   i32 timeout = 0; 
-  i32 res = poll(server->poll.fds, server->poll.len, timeout);
+  i32 res = poll(server->poll.items, server->poll.len, timeout);
 
 	return res;
 }
@@ -126,8 +170,8 @@ static ConnStatus conHandleConnect(Server* server,Client* client){
 	return CONN_KILL;
 }
 
-i32 conCheckConnections(Server* server){
-	struct pollfd listener = server->poll.fds[0];
+i32 conAcceptConnections(Server* server){
+	struct pollfd listener = server->poll.items[0];
 	int err = 0;
   if (listener.revents & POLLERR){
     err = listener.revents;
@@ -153,18 +197,16 @@ i32 conCheckConnections(Server* server){
 	return err;
 }
 
-i32 conHandleReceivData(Server *server, i32 clientIndex){
-	Client *client = &server->clients.clients[clientIndex-1];
-	
+i32 conHandleReceivData(Server *server, Client* client){	
 	client->last_updated = clock();//updates client clock
 
 	if(server->onmessage){
 		return server->onmessage(client,server->data);
 	} else {
-		char discard_buffer[1024] = {0};
 		//clear the recv buffer
+		char discard_buffer[1024] = {0};
 		while(
-			recv(client->fd,discard_buffer,1024,MSG_DONTWAIT)>0
+			recv(client->fd,discard_buffer,1024,MSG_DONTWAIT|MSG_NOSIGNAL)>0
 		){}
 	}
 	return CONN_KILL;
@@ -176,21 +218,21 @@ i32 conPollEvents(Server *server){
 		//loop through every connection trying to solve the event
 		//check for server new connections
 		int err = 0;
-		if((err = conCheckConnections(server)!=0)){
+		if((err = conAcceptConnections(server)!=0)){
 			fprintf(stderr,"And erros has ocurred on connection listener: %d\n",err);
 			exit(1);
 		}
 
 		//check for client messages
 		for(i32 index = 1;index<server->poll.len;index++){
-			struct pollfd *pfd = &server->poll.fds[index];
-			Client *client = &server->clients.clients[index-1];
+			struct pollfd *pfd = &server->poll.items[index];
+			Client *client = &server->clients.items[index-1];
 
 			//check if cliend file descriptor is still alive
-			char peek[1]  ={0};
-			int r = recv(pfd->fd,&peek,1,MSG_DONTWAIT|MSG_PEEK);
+			char peek_buff[1]  ={0};
+			int peek = recv(pfd->fd,&peek_buff,1,MSG_DONTWAIT|MSG_PEEK|MSG_NOSIGNAL);
 			
-			if(r==0){
+			if(peek==0){
 				printf("Client disconnected (%d)!\n",pfd->fd);
 				pfd->events = 0x0;//marks as delete
 			} else if (pfd->revents & POLLERR || pfd->revents & POLLNVAL) {
@@ -199,24 +241,27 @@ i32 conPollEvents(Server *server){
     	} else if (pfd->revents & POLLHUP) {
     		printf("Client pollhup\n");
     		pfd->events = 0x0;//marks as delete
-    	} else if (pfd->revents & POLLIN && r>0) {
+    	} else if (pfd->revents & POLLIN && peek>0) {
     		if(client->status == CONN_RETRY){
     			if(conHandleConnect(server,client))
     				pfd->events =0x0;//marks as dele
     		}
     		if(server->onmessage!=NULL){
     			client->last_updated = 0;//resets the last updated counter
-    			if(conHandleReceivData(server,index)==CONN_KILL)
+    			if(conHandleReceivData(server,client)==CONN_KILL)
 						pfd->events = 0x0;//markes as delete 
     		}
-  		} else client->last_updated = clock();
+  		} else {
+  			//for sure the client is still alive!
+  			client->last_updated = clock();
+  		}
 		}
 	} else if(server->onping) {
 		// printf("Sending pings:\n");
 		//loops over every client trying to
 		for(i32 index =1;index<server->poll.len;index++){
-			struct pollfd *pfd = &server->poll.fds[index];
-			Client *client = &server->clients.clients[index-1];
+			struct pollfd *pfd = &server->poll.items[index];
+			Client *client = &server->clients.items[index-1];
 
 			clock_t now = clock();
 			clock_t delta = now - client->last_updated;
@@ -238,14 +283,14 @@ i32 conPollEvents(Server *server){
 	//loop over clients checking who is still alive
 	for(i32 index = 1;index<server->poll.len;){
 		//swap client with the last
-		struct pollfd *pfd = &server->poll.fds[index];
-		Client *client = &server->clients.clients[index-1];
+		struct pollfd *pfd = &server->poll.items[index];
+		Client *client = &server->clients.items[index-1];
 
 		if(pfd->events==0x0 || client->status==CONN_KILL){
 			printf("Deleting connection!\n");
-			struct pollfd *last = &server->poll.fds[server->poll.len-1];
-			Client *current = &server->clients.clients[index-1];
-			Client *last_client = &server->clients.clients[server->clients.len-1];
+			struct pollfd *last = &server->poll.items[server->poll.len-1];
+			Client *current = &server->clients.items[index-1];
+			Client *last_client = &server->clients.items[server->clients.len-1];
 
 			//call disconnect callback
 			if(server->ondisconnect) server->ondisconnect(current,server->data);
